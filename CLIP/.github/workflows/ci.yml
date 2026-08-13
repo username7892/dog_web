@@ -1,0 +1,43 @@
+# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
+
+# Continuous Integration (CI) workflow for testing CLIP across Python and PyTorch versions
+
+name: CI
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "0 3 * * *" # daily at 03:00 UTC
+
+jobs:
+  CLIP-test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: [3.9, 3.13]
+        pytorch-version: [2.5.0, 2.8.0]
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - uses: ultralytics/actions/setup-uv@main
+
+      - name: Install dependencies
+        run: uv pip install --system -e . torch==${{ matrix.pytorch-version }} torchvision pytest --extra-index-url https://download.pytorch.org/whl/cpu
+
+      - name: Run tests
+        uses: ultralytics/actions/retry@main
+        with:
+          retries: 2
+          retry_delay_seconds: 10
+          run: uv run pytest

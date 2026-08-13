@@ -1,0 +1,27 @@
+# Python缓存
+__pycache__/
+*.pyc
+
+# 所有图片
+*.jpg
+*.jpeg
+*.png
+*.webp
+*.bmp
+
+# 图片目录
+export_jpg/
+images/
+
+# 大模型文件
+mobileclip_blt.ts
+
+# 压缩包
+*.zip
+
+# 备份文件
+*.bkp
+
+# Python环境
+venv/
+.env/
