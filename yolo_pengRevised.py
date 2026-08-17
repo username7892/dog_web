@@ -19,7 +19,7 @@ import traceback
 
 from ultralytics import YOLOE
 
-
+camera_id = "front camera"
 # ============================================================
 # 全局配置
 # ============================================================
@@ -588,7 +588,7 @@ def database_worker():
                 VALUES (%s,%s,%s)
                 """,
                 (
-                    data["camera_id"],
+                    camera_id,
                     data["image_path"],
                     data["frame_time"]
                 )
