@@ -121,7 +121,7 @@ def load_frames():
 
     camera_id = request.args.get(
         'camera_id',
-        'cam01'
+        'front_camera'
     )
 
     start = request.args.get('start')
@@ -242,11 +242,7 @@ def load_frames():
 @app.route('/api/export_mp4')
 def export_mp4():
 
-    camera_id = request.args.get(
-        'camera_id',
-        'cam01'
-    )
-
+    camera_id = request.args.get('camera_id')
     start = request.args.get('start')
     end = request.args.get('end')
 
