@@ -218,11 +218,11 @@ def set_classes_api():
         if cls:
             new_classes.append(cls)
 
-    if len(new_classes) == 0:
-        return jsonify({
-            "status": "error",
-            "msg": "至少输入一个有效的检测目标"
-        }), 400
+    # if len(new_classes) == 0:
+    #     return jsonify({
+    #         "status": "error",
+    #         "msg": "至少输入一个有效的检测目标"
+    #     }), 400
 
     # ========================================================
     # 关键：将前端获取的 classes 赋值给 get_display_classes
