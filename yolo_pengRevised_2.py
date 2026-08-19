@@ -9,6 +9,7 @@ import threading
 import torch
 import datetime
 import traceback
+import requests
 
 from ultralytics import YOLOE
 
@@ -460,6 +461,42 @@ def main():
                     "box": [x1, y1, x2, y2]
                 }
                 objects.append(obj)
+
+            try:
+                alert_config_resp = requests.get(
+                    'http://127.0.0.1:5000/api/get_audio_alert_config',
+                    timeout=0.5
+                )
+                if alert_config_resp.status_code == 200:
+                    alert_config = alert_config_resp.json()
+                else:
+                    alert_config = {'classes': []}
+            except:
+                alert_config = {'classes': []}
+            
+            alert_classes = alert_config.get('classes', [])
+            current_detected_indices = []
+            
+            if alert_classes:
+                for obj in objects:
+                    obj_name = obj['name']
+                    if obj_name in alert_classes:
+                        index = alert_classes.index(obj_name)
+                        if index not in current_detected_indices:
+                            current_detected_indices.append(index)
+            
+            try:
+                requests.post(
+                    'http://127.0.0.1:5000/api/update_detected_indices',
+                    json={'indices': current_detected_indices},
+                    timeout=0.5
+                )
+            except:
+                pass
+            
+            if current_detected_indices:
+                print(f"[ALERT] 检测到告警对象索引: {current_detected_indices}")
+            # ================================================
 
             abnormal, person = check_no_hat(objects)
             abnormal_conf = person["conf"] if (abnormal and person) else 0

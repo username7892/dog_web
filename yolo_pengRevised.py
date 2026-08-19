@@ -3,9 +3,10 @@ from web_server import (
     start_web,
     get_display_classes,
     get_current_classes,
-    get_no_alert_classes
+    get_no_alert_classes,
+    audio_alert_config,
 )
-
+import requests
 import queue
 import pymysql
 import cv2
@@ -55,6 +56,22 @@ CAMERA_TYPES = {
 
 db_queue = queue.Queue(maxsize=200)
 
+
+
+def update_detected_indices_to_server(indices):
+    """将检测到的索引推送到 web_server"""
+    try:
+        print(f"[YOLO] 准备推送索引: {indices}")
+        response = requests.post(  # 加上 response =
+            'http://127.0.0.1:5000/api/update_detected_indices', 
+            json={'indices': indices},
+            timeout=0.5
+        )
+        print(f"[YOLO] 推送结果: {response.status_code}")
+    except Exception as e:
+        print(f"[YOLO] 推送失败: {e}")
+# 在检测到告警对象后调用
+#update_detected_indices_to_server(current_detected_indices)
 # ============================================================
 # 摄像头信息
 # ============================================================
@@ -348,6 +365,8 @@ def main():
     class_update_interval = 0.5
     last_class_check = 0
 
+    detected_alert_indices = []  # 存储检测到的告警对象在 audio_alert_config['classes'] 中的索引
+    detected_indices_lock = threading.Lock()  # 线程锁
     # 主循环
     while True:
         frame = buffer.get(delay)
@@ -429,6 +448,53 @@ def main():
                     "conf": conf,
                     "box": [x1, y1, x2, y2]
                 })
+
+             # ================================================
+            # 新增：检测 audio_alert_config 并生成索引
+            # ================================================
+            try:
+                # 从 web_server 获取告警配置
+                alert_config_response = requests.get(
+                    'http://127.0.0.1:5000/api/get_audio_alert_config', 
+                    timeout=0.5
+                )
+                if alert_config_response.status_code == 200:
+                    alert_config = alert_config_response.json()
+                else:
+                    alert_config = {'classes': []}
+            except:
+                alert_config = {'classes': []}
+            
+            alert_classes = alert_config.get('classes', [])
+
+            # ===== 添加调试日志 =====
+            print(f"[DEBUG] alert_classes: {alert_classes}")
+            print(f"[DEBUG] all_objects names: {[obj['name'] for obj in all_objects]}")
+            print(f"[DEBUG] current_classes: {current_classes}")
+            # ========================
+
+
+
+            current_detected_indices = []
+            
+            if alert_classes:  # 如果有告警对象设置
+                for obj in all_objects:
+                    obj_name = obj['name']
+                    if obj_name in alert_classes:
+                        # 获取该对象在告警列表中的索引
+                        index = alert_classes.index(obj_name)
+                        if index not in current_detected_indices:
+                            current_detected_indices.append(index)
+
+
+            print(f"[DEBUG] current_detected_indices: {current_detected_indices}")
+            # 将检测到的索引推送到 web_server
+            update_detected_indices_to_server(current_detected_indices)
+            # 打印调试信息
+            if current_detected_indices:
+                print(f"[ALERT] 检测到告警对象索引: {current_detected_indices}")
+                print(f"[ALERT] 对应对象: {[alert_classes[i] for i in current_detected_indices]}")
+            
 
             # ⑥ 安全帽检测
             abnormal = False

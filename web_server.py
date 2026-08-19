@@ -223,6 +223,7 @@ def video():
     )
 
 
+
 # ============================================================
 # 获取当前 YOLO 检测类别
 # ============================================================
@@ -266,6 +267,8 @@ def get_classes_api():
     methods=["POST"]
 )
 def set_no_alert_objects_api():
+    global current_classes
+    global silent_alert_objects
 
     global current_classes
 
@@ -295,20 +298,23 @@ def set_no_alert_objects_api():
     # 检查是否是重置操作（包含 "#"）
     # ================================================
     if "#" in objects:
-        
-        # 清空不报警类别
+    
+    # 清空不报警类别
         set_no_alert_classes([])
-        
-        # 恢复默认检测类别
-        default_classes = [""]
+        silent_alert_objects = []
+    # 重置：只保留声音告警对象，清除无声告警对象
         with classes_lock:
-            current_classes = default_classes.copy()
+            # 获取当前声音告警对象
+            audio_objects = audio_alert_config.get('classes', [])
+            # 只保留声音告警对象
+            current_classes = audio_objects.copy()
         
         print()
         print("==============================")
         print("[WEB] 执行重置操作")
         print("[WEB] 已清空不报警类别")
-        print("[WEB] 已恢复默认检测类别:", default_classes)
+        print("[WEB] 保留声音告警对象:", audio_objects)
+        print("[WEB] 当前检测类别:", current_classes)
         print("==============================")
         print()
 
@@ -316,7 +322,7 @@ def set_no_alert_objects_api():
             "status": "ok",
             "msg": "已重置",
             "objects": [],
-            "classes": default_classes
+            "classes": current_classes
         })
 
     # ================================================
@@ -343,13 +349,14 @@ def set_no_alert_objects_api():
     set_no_alert_classes(
         clean_objects
     )
-
+    silent_alert_objects = clean_objects.copy()  # 保存无声告警对象
     # ★ 传给 YOLOE 作为检测类别
     with classes_lock:
 
-        current_classes = (
-            clean_objects.copy()
-        )
+        # 获取当前声音告警对象
+        audio_objects = audio_alert_config.get('classes', [])
+        # 合并：声音告警对象 + 无声告警对象
+        current_classes = list(set(audio_objects + clean_objects))
 
     print()
     print("==============================")
@@ -369,9 +376,7 @@ def set_no_alert_objects_api():
         "objects": clean_objects,
 
         "classes": clean_objects
-
-    })
-
+   })
 
 # ============================================================
 # 获取当前不报警类别
@@ -396,7 +401,80 @@ def get_no_alert_objects_api():
 
     })
 
+import json
 
+# 全局变量存储声音告警设置
+# 全局变量
+audio_alert_config = {'classes': []}
+silent_alert_objects = []  # 新增：单独存储无声告警对象
+
+@app.route('/api/audio_alert_settings', methods=['POST'])
+def save_audio_alert_settings():
+    try:
+        global audio_alert_config
+        global current_classes
+        global silent_alert_objects  # 引用全局变量
+        
+        data = request.get_json()
+        audio_alert_config['classes'] = data.get('classes', [])
+        audio_alert_config['language'] = data.get('language', [])  # 现在是数组
+        # 重置逻辑：current_classes = 无声告警对象 + 新的声音告警对象
+        with classes_lock:
+            # 直接使用 silent_alert_objects 作为无声告警对象
+            merged = list(set(silent_alert_objects + audio_alert_config['classes']))
+            current_classes = merged.copy()
+        
+        print(f"[AUDIO ALERT] 声音告警对象: {audio_alert_config['classes']}")
+        print(f"[SILENT] 无声告警对象: {silent_alert_objects}")
+        print(f"[MERGED] 合并后检测类别: {current_classes}")
+        
+        return jsonify({'status': 'success', 'classes': audio_alert_config['classes']})
+    
+    except Exception as e:
+        import traceback
+        print(f"[ERROR] save_audio_alert_settings 异常: {e}")
+        traceback.print_exc()
+        return jsonify({'status': 'error', 'msg': str(e)}), 500
+
+
+# web_server.py 中添加
+@app.route('/api/get_audio_alert_config', methods=['GET'])
+def get_audio_alert_config_api():
+    """返回当前声音告警配置"""
+    global audio_alert_config
+    print(f"[WEB] 返回告警配置: {audio_alert_config}")  # 添加调试
+    return jsonify(audio_alert_config)
+
+
+detected_alert_indices = []
+
+@app.route('/api/update_detected_indices', methods=['POST'])
+def update_detected_indices():
+    """YOLO 主程序调用，更新检测到的索引"""
+    global detected_alert_indices
+    data = request.get_json()
+    detected_alert_indices = data.get('indices', [])
+    print(f"[WEB SERVER] 收到检测到的索引: {detected_alert_indices}")  # 添加这行
+    return jsonify({'status': 'success'})
+
+detected_indices_lock = threading.Lock()  # 添加这行
+@app.route('/api/get_detected_alert_indices', methods=['GET'])
+def get_detected_alert_indices_api():
+    """返回当前检测到的告警对象索引列表"""
+    global detected_alert_indices
+    global audio_alert_config
+    
+    with detected_indices_lock:
+        indices = detected_alert_indices.copy()
+    
+    # language 现在是数组
+    language = audio_alert_config.get('language', [])
+    
+    return jsonify({
+        'indices': indices,
+        'objects': [audio_alert_config.get('classes', [])[i] if i < len(audio_alert_config.get('classes', [])) else '' for i in indices],
+        'language': language
+    })
 # ============================================================
 # 获取当前显示类别
 # ============================================================
