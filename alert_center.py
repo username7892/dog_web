@@ -8,10 +8,6 @@ import os
 from aliyunsdkcore.client import AcsClient
 from aliyunsdkdysmsapi.request.v20170525.SendSmsRequest import SendSmsRequest
 
-# ✅ 调试用（验证通过后请删掉）
-ACCESS_KEY_ID = "未知"
-ACCESS_KEY_SECRET = "不给你看"
-
 SIGN_NAME = "舟山市千鹏无人机科技"       # ✅ 图1里的签名
 TEMPLATE_CODE = "SMS_505370126"         # ✅ 图2里的模板CODE（已修正！）
 REGION = "cn-hangzhou"
@@ -124,45 +120,16 @@ def load_message_key():
             f"读取 AK/SK 失败: {e}"
         )
         raise
+
+    
 def send_sms(phone, message, location="未知位置", conf=None):
     try:
-        # =====================================================
-        # 读取 message_key.json
-        # =====================================================
-        base_dir = os.path.dirname(
-            os.path.abspath(__file__)
-        )
-
-        key_path = os.path.join(
-            base_dir,
-            "message_key.json"
-        )
-
-        with open(
-            key_path,
-            "r",
-            encoding="utf-8"
-        ) as f:
-            key_config = json.load(f)
-
-        access_key_id = key_config.get("ACCESS_KEY_ID")
-        access_key_secret = key_config.get("ACCESS_KEY_SECRET")
-
-        # 检查 AK/SK
-        if not access_key_id:
-            print("[SMS ERROR] message_key.json 中没有 ACCESS_KEY_ID")
-            return False
-
-        if not access_key_secret:
-            print("[SMS ERROR] message_key.json 中没有 ACCESS_KEY_SECRET")
-            return False
-
-        print("[SMS] AK/SK 读取成功")
+        access_key_id, access_key_secret = load_message_key()
 
         client = AcsClient(
-            ACCESS_KEY_ID,
-            ACCESS_KEY_SECRET,
-            "cn-hangzhou"
+            access_key_id,
+            access_key_secret,
+            REGION
         )
 
         template_param = {
@@ -173,15 +140,28 @@ def send_sms(phone, message, location="未知位置", conf=None):
 
         req = SendSmsRequest()
         req.set_PhoneNumbers(phone)
-        req.set_SignName("舟山市千鹏无人机科技")
-        req.set_TemplateCode("SMS_505370126")
-        req.set_TemplateParam(json.dumps(template_param, ensure_ascii=False))
+        req.set_SignName(SIGN_NAME)
+        req.set_TemplateCode(TEMPLATE_CODE)
+        req.set_TemplateParam(
+            json.dumps(
+                template_param,
+                ensure_ascii=False
+            )
+        )
 
         resp = client.do_action_with_exception(req)
-        print("[SMS SEND SUCCESS]", resp.decode())
+
+        print(
+            "[SMS RESPONSE]",
+            resp.decode("utf-8")
+        )
+
         return True
 
     except Exception as e:
-        print("[SMS SEND ERROR]", str(e))
+        print(
+            "[SMS SEND ERROR]",
+            repr(e)
+        )
         traceback.print_exc()
         return False

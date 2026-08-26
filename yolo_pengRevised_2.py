@@ -549,7 +549,7 @@ def main():
                     "conf": conf,
                     "box": [x1, y1, x2, y2],
                 })
-
+                obj = {"name": name, "conf": conf, "box": [x1, y1, x2, y2]}
                 if name in alert_classes_2 and SMS_CONFIG.get("contact_phone"):
                     if alert_center.should_send_sms(name):
                         phone = SMS_CONFIG["contact_phone"]
@@ -558,7 +558,7 @@ def main():
                             phone=phone,
                             message=name,                 # → alert_type
                             location=location,             # → patient_name
-                            conf=objects.get("conf")           # → value
+                            conf=obj.get("conf")           # → value
                         )
                 
                         if not ok:
