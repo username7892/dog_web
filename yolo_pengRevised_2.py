@@ -1,4 +1,4 @@
-from web_server_2 import update_frame, start_web, get_display_classes
+from web_server_2 import update_frame, start_web, get_display_classes,SMS_CONFIG
 
 import queue
 import pymysql
@@ -12,7 +12,8 @@ import traceback
 import requests
 
 from ultralytics import YOLOE
-
+from alert_center import AlertCenter,send_sms
+alert_center = AlertCenter(cooldown_seconds=300)
 camera_id = "rear camera"
 
 #安全帽判断
@@ -69,8 +70,8 @@ def check_no_hat(objects):
 # ============================================================
 
 RTSP_URL = (
-    "rtsp://m20-detector:f715e51840a1359d569bbb9a42af402e@120.26.18.138:8554/camera-rear"
-    #"rtsp://admin:dhlb839.@192.168.50.64:554/Streaming/Channels/102"
+    #"rtsp://m20-detector:f715e51840a1359d569bbb9a42af402e@120.26.18.138:8554/camera-rear"
+    "rtsp://admin:dhlb839.@192.168.50.64:554/Streaming/Channels/102"
 )
 
 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
@@ -210,7 +211,7 @@ class DualRTSP:
 
     def _switch(self):
         self.active = 2 if self.active == 1 else 1
-        print(f"[RTSP] 切换到 cap{self.active}")
+        
 
     def stop(self):
         self.running = False
@@ -413,7 +414,8 @@ def main():
     # ✅ 安全帽时间计数器
     # =========================
     no_helmet_start_time = {}  # person_id -> timestamp
-    NO_HELMET_ALERT_SECONDS = 3.0  # 持续多少秒才报警
+    NO_HELMET_ALERT_SECONDS = 2.0  # 持续多少秒才报警
+    helmet_clear_counter = {}
     while True:
         try:
             frame = buffer.get()
@@ -463,10 +465,27 @@ def main():
             # =========================
             # ④ set_classes（原逻辑）
             # =========================
+            alert_str_2 = SMS_CONFIG.get("alert_object")
+            alert_classes_2 = set()
+
+            if alert_str_2:
+                alert_classes_2 = {
+                    x.strip() for x in alert_str_2.split(",") if x.strip()
+                }
+                for cls in alert_classes_2:
+                    if cls not in display_classes:
+                        display_classes.append(cls)
+
+            print("✅ alert_classes_2:", alert_classes_2)
+            print("✅ display_classes:", display_classes)
+
+
+
             if display_classes != last_classes:
                 print("\n" + "=" * 40)
                 print(f"[WEB] 前端选择类别: {display_classes}")
                 print("=" * 40)
+
 
                 if display_classes:
                     try:
@@ -498,7 +517,12 @@ def main():
             # =========================
             # ⑤ YOLOE 推理
             # =========================
-            results = model.predict(frame, conf=0.6, verbose=False)
+
+
+            # =========================
+            # ② 推理
+            # =========================
+            results = model.predict(frame, conf=0.5, verbose=False)
             if not results:
                 update_frame(frame)
                 continue
@@ -506,21 +530,46 @@ def main():
             res = results[0]
             objects = []
 
+            # =========================
+            # ③ 遍历检测框（完全对齐你给的正确模板）
+            # =========================
             for box in res.boxes:
                 cls_id = int(box.cls[0])
-                conf = float(box.conf[0])
+                name = res.names.get(cls_id, str(cls_id))
 
-                if cls_id < 0 or cls_id >= len(display_classes):
+                # ✅ 先过滤当前启用类别
+                if name not in display_classes:
                     continue
 
-                name = display_classes[cls_id]
+                conf = float(box.conf[0])
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
 
                 objects.append({
                     "name": name,
                     "conf": conf,
-                    "box": [x1, y1, x2, y2]
+                    "box": [x1, y1, x2, y2],
                 })
+
+                if name in alert_classes_2 and SMS_CONFIG.get("contact_phone"):
+                    if alert_center.should_send_sms(name):
+                        phone = SMS_CONFIG["contact_phone"]
+                
+                        ok = send_sms(
+                            phone=phone,
+                            message=name,                 # → alert_type
+                            location=location,             # → patient_name
+                            conf=objects.get("conf")           # → value
+                        )
+                
+                        if not ok:
+                            alert_center.rollback(name)
+
+            # =========================
+            # ④ 调试输出（和你给的模板一致）
+            # =========================
+            print(f"[DEBUG] objects names: {[o['name'] for o in objects]}")
+            print(f"[DEBUG] display_classes: {display_classes}")
+            print(f"[DEBUG] alert_classes_2: {alert_classes_2}")
 
             # =========================
             # ⑥ 告警索引（核心）
@@ -547,7 +596,7 @@ def main():
                     x1, y1, x2, y2 = person_obj["box"]
                     head_cx = int((x1 + x2) / 2)
                     head_cy = int(y1 + (y2 - y1) * 0.2)
-                    person_id = (head_cx // 10, head_cy // 10)
+                    person_id = (head_cx // 30, head_cy // 30)
 
                     if single_frame_abnormal:
                         if person_id not in no_helmet_start_time:
@@ -559,6 +608,19 @@ def main():
                     else:
                         # ✅ 只要一帧戴了，立刻清零
                         no_helmet_start_time.pop(person_id, None)
+
+                    # # ✅ 只有连续 3 帧都判定“戴了”，才清零
+                    # if not single_frame_abnormal:
+                    #     if person_id not in helmet_clear_counter:
+                    #         helmet_clear_counter[person_id] = 1
+                    #     else:
+                    #         helmet_clear_counter[person_id] += 1
+
+                    #     if helmet_clear_counter[person_id] >= 3:
+                    #         no_helmet_start_time.pop(person_id, None)
+                    #         helmet_clear_counter.pop(person_id, None)
+                    # else:
+                    #     helmet_clear_counter.pop(person_id, None)
 
                 # ✅ 清理离开画面的人
                 no_helmet_start_time = {

@@ -25,3 +25,14 @@ mobileclip_blt.ts
 # Python环境
 venv/
 .env/
+# YOLO模型
+*.pt
+
+# Sentry运行文件
+.sentry-native/
+
+# 临时文件
+*.ts
+
+# json文件
+*.json

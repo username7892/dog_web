@@ -19,7 +19,10 @@ latest_frame = None
 
 frame_lock = threading.Lock()
 
-
+SMS_CONFIG = {
+    "alert_object": None,
+    "contact_phone": None
+}
 # ============================================================
 # 当前 YOLO 检测类别
 # ============================================================
@@ -346,7 +349,59 @@ def get_detected_alert_indices_api():
     return jsonify(indices)  # 直接返回列表
     
 
+@app.route('/api/sms/config', methods=['POST'])
+def set_sms_config():
+    if not request.is_json:
+        return jsonify({
+            'success': False,
+            'message': '请求必须是 JSON'
+        }), 400
 
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({
+            'success': False,
+            'message': 'JSON 解析失败'
+        }), 400
+
+    alert_object = data.get('alertObject')
+    contact_phone = data.get('contactPhone')
+
+    if not alert_object or not contact_phone:
+        return jsonify({
+            'success': False,
+            'message': '参数不完整'
+        }), 400
+
+    # ✅ 写入全局变量
+    SMS_CONFIG['alert_object'] = alert_object
+    SMS_CONFIG['contact_phone'] = contact_phone
+
+    print("✅ 短信配置已更新：", SMS_CONFIG)
+
+    return jsonify({
+        'success': True,
+        'message': '短信配置已保存'
+    })
+
+@app.route('/api/sms/config/reset', methods=['POST'])
+def reset_sms_config():
+    try:
+        # ✅ 清空全局变量
+        SMS_CONFIG['alert_object'] = None
+        SMS_CONFIG['contact_phone'] = None
+
+        print("✅ 短信配置已重置")
+
+        return jsonify({
+            'success': True,
+            'message': '短信配置已清空'
+        })
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'message': str(e)
+        }), 500
     # ========================================================
     # 获取 JSON
     # ========================================================

@@ -5,6 +5,7 @@ from web_server import (
     get_current_classes,
     get_no_alert_classes,
     audio_alert_config,
+    SMS_CONFIG
 )
 import requests
 import queue
@@ -16,171 +17,74 @@ import threading
 import torch
 import datetime
 import traceback
-
 from ultralytics import YOLOE
+from alert_center import AlertCenter,send_sms
 
-camera_id = "front camera"
+
 # ============================================================
 # 全局配置
 # ============================================================
-
-RTSP_URL = (
-    "rtsp://m20-detector:f715e51840a1359d569bbb9a42af402e@120.26.18.138:8554/camera-front"
-    #"rtsp://admin:dhlb839.@192.168.50.64:554/Streaming/Channels/101"
-)
-
+camera_id = "front_camera"
+RTSP_URL = "rtsp://admin:dhlb839.@192.168.50.64:554/Streaming/Channels/101"
 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
-
-
-# 全局：始终参与检测
-SAFETY_CLASSES = {
-    "person",
-    "helmet",
-}
-
-# # 火源类
-# FIRE_SOURCES = {
-#     "fire",
-#     "flame",
-#     "spark",
-#     "welding",
-#     "electric_spark",
-# }
-
-# # 易燃物类
-# FLAMMABLES = {
-#     "gas_tank",
-#     "oil_drum",
-#     "wood",
-#     "paper",
-#     "cardboard",
-#     "cloth",
-#     "flammable_liquid",
-# }
-
-
-
-# ============================================================
-# 图片保存
-# ============================================================
-
+SAFETY_CLASSES = {""}
 SAVE_DIR = "images"
 os.makedirs(SAVE_DIR, exist_ok=True)
-
-# ============================================================
-# 摄像头信息
-# ============================================================
-
-CAMERA_LOCATIONS = {
-    "front_camera": "前摄像头",
-}
-
-CAMERA_TYPES = {
-    "front_camera": "front camera",
-}
-
-# ============================================================
-# 数据库队列
-# ============================================================
-
+CAMERA_LOCATIONS = {"front_camera": "前摄像头"}
+CAMERA_TYPES = {"front_camera": "front camera"}
 db_queue = queue.Queue(maxsize=200)
-
-
-
-def update_detected_indices_to_server(indices):
-    """将检测到的索引推送到 web_server"""
-    try:
-        print(f"[YOLO] 准备推送索引: {indices}")
-        response = requests.post(  # 加上 response =
-            'http://127.0.0.1:5000/api/update_detected_indices', 
-            json={'indices': indices},
-            timeout=0.5
-        )
-        print(f"[YOLO] 推送结果: {response.status_code}")
-    except Exception as e:
-        print(f"[YOLO] 推送失败: {e}")
-# 在检测到告警对象后调用
-#update_detected_indices_to_server(current_detected_indices)
+alert_center = AlertCenter(cooldown_seconds=300)
 # ============================================================
-# 摄像头信息
+# 基础工具
 # ============================================================
-
 def get_camera_info(camera_id):
-    location = CAMERA_LOCATIONS.get(camera_id, camera_id)
-    camera_type = CAMERA_TYPES.get(camera_id, "前摄")
-    return location, camera_type
-
-
-
-
-
-
-
-# ============================================================
-# 安全帽检测
-# ============================================================
+    return CAMERA_LOCATIONS.get(camera_id, camera_id), CAMERA_TYPES.get(camera_id, "前摄")
 
 def get_yolo_classes(current_classes):
     return list(set(current_classes) | SAFETY_CLASSES)
 
-
+# ============================================================
+# 安全帽判断
+# ============================================================
 def check_no_hat(objects):
     persons = [o for o in objects if o["name"] == "person"]
     helmets = [o for o in objects if o["name"] == "helmet"]
-
     if not persons:
         return False, None
-
-    # 给每个人计算头部区域
     person_heads = []
     for p in persons:
         x1, y1, x2, y2 = p["box"]
-        h_y1 = y1
-        h_y2 = y1 + (y2 - y1) * 0.3
         person_heads.append({
             "person": p,
-            "x1": x1, "x2": x2,
-            "y1": h_y1, "y2": h_y2
+            "x1": x1,
+            "x2": x2,
+            "y1": y1,
+            "y2": y1 + (y2 - y1) * 0.3
         })
-
-    # 每个安全帽匹配最近的人
     matched_person_indices = set()
-
     for h in helmets:
         hx1, hy1, hx2, hy2 = h["box"]
-        cx = (hx1 + hx2) / 2
-        cy = (hy1 + hy2) / 2
-
-        best_p = None
-        best_dist = float("inf")
-
+        cx, cy = (hx1 + hx2) / 2, (hy1 + hy2) / 2
+        best_p, best_dist = None, float("inf")
         for i, head in enumerate(person_heads):
             if head["x1"] < cx < head["x2"] and head["y1"] < cy < head["y2"]:
                 dist = abs(cy - (head["y1"] + head["y2"]) / 2)
                 if dist < best_dist:
-                    best_dist = dist
-                    best_p = i
-
+                    best_dist, best_p = dist, i
         if best_p is not None:
             matched_person_indices.add(best_p)
-
-    # 找第一个没匹配到帽子的人
     for i, head in enumerate(person_heads):
         if i not in matched_person_indices:
             return True, head["person"]
-
     return False, None
 
 # ============================================================
 # RTSP RingBuffer
 # ============================================================
-
 class RingBuffer:
     def __init__(self, size=50):
-        self.size = size
-        self.buffer = [None] * size
-        self.index = 0
-        self.count = 0
+        self.size, self.buffer = size, [None] * size
+        self.index = self.count = 0
         self.lock = threading.Lock()
 
     def put(self, frame):
@@ -193,36 +97,33 @@ class RingBuffer:
         with self.lock:
             if self.count <= delay:
                 return None
-            idx = (self.index - delay - 1) % self.size
-            return self.buffer[idx]
+            return self.buffer[(self.index - delay - 1) % self.size]
 
 # ============================================================
-# RTSP
+# Dual RTSP
 # ============================================================
-
 class DualRTSP:
     def __init__(self, url, buffer):
-        self.url = url
-        self.buffer = buffer
-        self.cap1 = None
-        self.cap2 = None
+        self.url, self.buffer = url, buffer
+        self.cap1 = self.cap2 = None
         self.active = 1
         self.running = True
         self.fixing = None
 
     def _open(self):
+        print("[RTSP] 正在连接:", self.url)
         cap = cv2.VideoCapture(self.url, cv2.CAP_FFMPEG)
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        return cap if cap.isOpened() else None
+        if cap.isOpened():
+            print("[RTSP] 连接成功")
+            return cap
+        return None
 
     def _fix_cap(self, num):
         while self.running and self.fixing == num:
             cap = self._open()
             if cap:
-                if num == 1:
-                    self.cap1 = cap
-                else:
-                    self.cap2 = cap
+                setattr(self, f"cap{num}", cap)
                 self.fixing = None
                 return
             time.sleep(1)
@@ -231,18 +132,16 @@ class DualRTSP:
         self.cap1 = self._open()
         time.sleep(0.3)
         self.cap2 = self._open()
-
         if not self.cap1 and not self.cap2:
             self.running = False
             print("[RTSP] 两个连接都失败")
             return
-
         while self.running:
             cap = self.cap1 if self.active == 1 else self.cap2
-            if cap is None:
+            if not cap:
                 self._switch()
+                time.sleep(0.05)
                 continue
-
             ret, frame = cap.read()
             if ret and frame is not None:
                 self.buffer.put(frame)
@@ -275,86 +174,47 @@ class DualRTSP:
             self.cap2.release()
 
 # ============================================================
+# 告警索引推送
+# ============================================================
+def update_detected_indices_to_server(indices):
+    try:
+        print(f"[YOLO] 准备推送索引: {indices}")
+        r = requests.post("http://127.0.0.1:5000/api/update_detected_indices",
+                          json={"indices": indices}, timeout=0.5)
+        print(f"[YOLO] 推送结果: {r.status_code}")
+    except Exception as e:
+        print(f"[YOLO] 推送失败: {e}")
+
+# ============================================================
 # 数据库线程
 # ============================================================
-
 def database_worker():
     print("[DB] 数据库线程启动")
-    db = pymysql.connect(
-        host="localhost",
-        user="root",
-        password="123456",
-        database="yolo_images",
-        charset="utf8mb4"
-    )
+    db = pymysql.connect(host="localhost", user="root", password="123456",
+                         database="yolo_images", charset="utf8mb4")
     cursor = db.cursor()
-
     while True:
         data = db_queue.get()
         try:
-            # 先查询该摄像头当前最大的 camera_seq
-            cursor.execute(
-                """
-                SELECT COALESCE(MAX(camera_seq), 0) + 1
-                FROM images
-                WHERE camera_id = %s
-                """,
-                (camera_id,)
-            )
-            next_seq = cursor.fetchone()[0]
-
-            cursor.execute(
-                """
-                INSERT INTO images
-                (camera_id, camera_seq, image, frame_time)
-                VALUES (%s,%s,%s,%s)
-                """,
-                (
-                    camera_id,
-                    next_seq,
-                    data["image_path"],
-                    data["frame_time"]
-                )
-            )
-
+            cid = data["camera_id"]
+            cursor.execute("SELECT COALESCE(MAX(camera_seq),0)+1 FROM images WHERE camera_id=%s", (cid,))
+            seq = cursor.fetchone()[0]
+            cursor.execute("INSERT INTO images (camera_id,camera_seq,image,frame_time) VALUES (%s,%s,%s,%s)",
+                           (cid, seq, data["image_path"], data["frame_time"]))
             image_id = cursor.lastrowid
-
             for obj in data["objects"]:
                 x1, y1, x2, y2 = obj["box"]
                 cursor.execute(
-                    """
-                    INSERT INTO detections
-                    (image_id, class_name, confidence,
-                     x1, y1, x2, y2)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s)
-                    """,
-                    (
-                        image_id,
-                        obj["name"],
-                        obj["conf"],
-                        x1, y1, x2, y2
-                    )
-                )
-
+                    "INSERT INTO detections (image_id,class_name,confidence,x1,y1,x2,y2) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s)",
+                    (image_id, obj["name"], obj["conf"], x1, y1, x2, y2))
             if data["abnormal"]:
                 cursor.execute(
-                    """
-                    INSERT INTO abnormal_events
-                    (image_id, event_type, description,
-                     camera_id, confidence)
-                    VALUES (%s,%s,%s,%s,%s)
-                    """,
-                    (
-                        image_id,
-                        "no_hat",
-                        "人员未佩戴安全帽",
-                        camera_id,
-                        data["abnormal_conf"]
-                    )
-                )
-
+                    "INSERT INTO abnormal_events (image_id,event_type,description,camera_id,confidence) "
+                    "VALUES (%s,%s,%s,%s,%s)",
+                    (image_id, "no_hat", "人员未佩戴安全帽", cid, data["abnormal_conf"]))
             db.commit()
-
+            print(f"[DB] 保存成功 image_id={image_id}, camera_id={cid}, camera_seq={seq}")
         except Exception as e:
             print("[DB ERROR]", e)
             db.rollback()
@@ -364,251 +224,195 @@ def database_worker():
 # ============================================================
 # 主程序
 # ============================================================
-
 def main():
-    camera_id = "front_camera"
-    location, camera_type = get_camera_info(camera_id)
+    current_camera_id = "front_camera"
+    location, camera_type = get_camera_info(current_camera_id)
 
-    # GPU
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
-    print(f"\n{'='*32}\n设备: {device}\n{'='*32}\n")
+    print("\n" + "=" * 40)
+    print(f"[SYSTEM] device: {device}")
+    print(f"[SYSTEM] camera: {current_camera_id}")
+    print(f"[SYSTEM] location: {location}")
+    print(f"[SYSTEM] camera_type: {camera_type}")
+    print("=" * 40)
 
-    # YOLOE
     print("[YOLO] 正在加载 YOLOE...")
-    model = YOLOE("yoloe-v8l-seg.pt")
-    model.to(device)
+    model = YOLOE("yoloe-v8l-seg.pt").to(device)
     print("[YOLO] YOLOE 加载完成")
 
-    # 初始化检测类别
-    current_classes = ["person", "car", "dog", "cup", "phone"]
-    current_classes = list(dict.fromkeys(current_classes))
-    print(f"\n{'='*32}\n【INIT】初始检测类别:\n{current_classes}\n{'='*32}\n")
+    current_classes = list(dict.fromkeys(["person", "car", "dog", "cup", "phone"]))
+    initial_classes = get_yolo_classes(current_classes)
+    print("\n" + "=" * 40)
+    print("[INIT] 初始检测类别:")
+    print(initial_classes)
+    print("=" * 40)
 
     try:
-        yolo_classes = get_yolo_classes(current_classes)
-        model.set_classes(yolo_classes)
-        print("[YOLO] 初始类别设置成功:", yolo_classes)
+        model.set_classes(initial_classes)
+        current_classes = initial_classes.copy()
+        print("[YOLO] 初始 set_classes 成功")
     except Exception:
-        print("[YOLO] 初始 set_classes 失败:")
+        print("[YOLO] 初始 set_classes 失败")
         traceback.print_exc()
 
-    # RTSP
     buffer = RingBuffer(50)
     rtsp = DualRTSP(RTSP_URL, buffer)
     threading.Thread(target=rtsp.run, daemon=True).start()
-
-    # Web
     threading.Thread(target=start_web, daemon=True).start()
-
-    # 数据库线程
     threading.Thread(target=database_worker, daemon=True).start()
-
     time.sleep(3)
 
-    # 参数
     delay = 15
-    last_save = 0
-    last_abnormal = 0
+    last_save = last_abnormal = 0
     save_interval = 2
     abnormal_interval = 5
     class_update_interval = 0.5
     last_class_check = 0
+    no_helmet_timer = {}
+    NO_HELMET_ALERT_SECONDS = 2.0
 
-    detected_alert_indices = []
-    detected_indices_lock = threading.Lock()
-    # =========================
-    # ✅ 安全帽持续未佩戴计时器
-    # =========================
-    no_helmet_timer = {}  # person_id -> start_time
-    NO_HELMET_ALERT_SECONDS = 3.0
-    # 主循环
     while True:
+        print("AK_ID:", os.getenv("ALIBABA_CLOUD_ACCESS_KEY_ID"))
+        print("AK_SECRET:", "已加载" if os.getenv("ALIBABA_CLOUD_ACCESS_KEY_SECRET") else "未加载")
+
         frame = buffer.get(delay)
         if frame is None:
             time.sleep(0.01)
             continue
-
         try:
             now = time.time()
 
-            # =========================
-            # ① 获取告警配置
-            # =========================
             try:
-                alert_config_response = requests.get(
-                    'http://127.0.0.1:5000/api/get_audio_alert_config',
-                    timeout=0.5
-                )
-                if alert_config_response.status_code == 200:
-                    alert_config = alert_config_response.json()
-                else:
-                    alert_config = {'classes': []}
+                r = requests.get("http://127.0.0.1:5000/api/get_audio_alert_config", timeout=0.5)
+                alert_config = r.json() if r.status_code == 200 else {"classes": []}
             except Exception:
-                alert_config = {'classes': []}
+                alert_config = {"classes": []}
+            alert_classes = alert_config.get("classes", [])
 
-            alert_classes = alert_config.get('classes', [])
-
-            # =========================
-            # ② person / person without helmet → 强制注入检测类
-            # =========================
             need_person_alert = "person" in alert_classes
             need_helmet_check = "person without helmet" in alert_classes
 
-            # 注意：只往 current_classes 加 YOLOE 真能检的实体类
-            if need_person_alert and "person" not in current_classes:
-                current_classes = list(dict.fromkeys(current_classes + ["person"]))
-
-            if need_helmet_check:
-                if "person" not in current_classes:
-                    current_classes = list(dict.fromkeys(current_classes + ["person"]))
-                if "helmet" not in current_classes:
-                    current_classes = list(dict.fromkeys(current_classes + ["helmet"]))
-                    print("[YOLO] 注入 helmet（因 person without helmet 告警）")
-
-            # =========================
-            # ③ 定时更新检测类别
-            # =========================
             if now - last_class_check >= class_update_interval:
                 last_class_check = now
+
                 try:
-                    new_classes = get_current_classes()
+                    frontend_classes = get_current_classes() or []
                 except Exception as e:
                     print("[CLASS ERROR]", e)
-                    new_classes = current_classes
+                    frontend_classes = []
 
-                if new_classes is None:
-                    new_classes = []
+                frontend_classes = [str(c).strip() for c in frontend_classes if str(c).strip()]
+                frontend_classes = list(dict.fromkeys(frontend_classes))
 
-                new_classes = [str(c) for c in new_classes if str(c).strip()]
-                new_classes = list(dict.fromkeys(new_classes))
+                alert_str_2 = SMS_CONFIG.get("alert_object", "")
+                alert_classes_2 = {x.strip() for x in alert_str_2.split(",") if x.strip()} if alert_str_2 else set()
 
-                if new_classes != current_classes:
-                    print(f"\n{'='*32}\n【YOLO CLASS UPDATE】\n旧类别: {current_classes}\n新类别: {new_classes}\n{'='*32}\n")
-                    current_classes = new_classes.copy()
-                    if current_classes:
-                        try:
-                            yolo_classes = get_yolo_classes(current_classes)
-                            model.set_classes(yolo_classes)
-                            print("[YOLO] set_classes 成功:", yolo_classes)
-                        except Exception as e:
-                            print("[YOLO] set_classes 失败:", e)
-                            traceback.print_exc()
+                final_classes = set(frontend_classes) | SAFETY_CLASSES
+                if need_person_alert:
+                    final_classes.add("person")
+                if need_helmet_check:
+                    final_classes.update(["person", "helmet"])
+                final_classes |= alert_classes_2
+                final_classes = sorted(final_classes)
 
-            # =========================
-            # ④ 不报警对象
-            # =========================
+                if set(final_classes) != set(current_classes):
+                    print("\n" + "=" * 60)
+                    print("[YOLO CLASS UPDATE]")
+                    print("前端类别:", frontend_classes)
+                    print("音频告警:", alert_classes)
+                    print("SMS类别:", sorted(alert_classes_2))
+                    print("安全类别:", sorted(SAFETY_CLASSES))
+                    print("最终YOLOE类别:", final_classes)
+                    print("=" * 60)
+                    try:
+                        model.set_classes(final_classes)
+                        current_classes = final_classes.copy()
+                        print("[YOLO] set_classes 成功:", current_classes)
+                    except Exception as e:
+                        print("[YOLO] set_classes 失败:", e)
+                        traceback.print_exc()
+
             try:
-                no_alert_classes = get_no_alert_classes()
+                no_alert_classes = get_no_alert_classes() or set()
             except Exception as e:
                 print("[NO ALERT ERROR]", e)
                 no_alert_classes = set()
-            if no_alert_classes is None:
-                no_alert_classes = set()
-            no_alert_classes = set(no_alert_classes)
 
-            # =========================
-            # ⑤ YOLOE 推理
-            # =========================
-            res = model.predict(frame, conf=0.6, verbose=False)[0]
-
+            res = model.predict(frame, conf=0.2, verbose=False)[0]
             all_objects = []
+
             for box in res.boxes:
                 cls_id = int(box.cls[0])
                 name = res.names.get(cls_id, str(cls_id))
-
                 if name not in current_classes:
                     continue
-
                 conf = float(box.conf[0])
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
+                obj = {"name": name, "conf": conf, "box": [x1, y1, x2, y2]}
+                all_objects.append(obj)
+                if name in alert_classes_2 and SMS_CONFIG.get("contact_phone"):
+                    if alert_center.should_send_sms(name):
+                        phone = SMS_CONFIG["contact_phone"]
 
-                all_objects.append({
-                    "name": name,
-                    "conf": conf,
-                    "box": [x1, y1, x2, y2]
-                })
+                        ok = send_sms(
+                            phone=phone,
+                            message=name,                 # → alert_type
+                            location=location,             # → patient_name
+                            conf=obj.get("conf")           # → value
+                        )
 
-            print(f"[DEBUG] all_objects names: {[o['name'] for o in all_objects]}")
-            print(f"[DEBUG] current_classes: {current_classes}")
-            print(f"[DEBUG] alert_classes: {alert_classes}")
+                        if not ok:
+                            alert_center.rollback(name)
 
-            # =========================
-            # ⑥ 告警索引（核心）
-            # =========================
+
+
+            print("[DEBUG] all_objects names:", [o["name"] for o in all_objects])
+            print("[DEBUG] current_classes:", current_classes)
+            print("[DEBUG] SMS alert_classes:", sorted(alert_classes_2))
+
             current_detected_indices = []
-
-            # ✅ 6.1 "person" 在告警列表 → 检测到人就立即告警
-            if need_person_alert:
-                if any(o["name"] == "person" for o in all_objects):
+            if need_person_alert and any(o["name"] == "person" for o in all_objects):
+                if "person" in alert_classes:
                     idx = alert_classes.index("person")
                     if idx not in current_detected_indices:
                         current_detected_indices.append(idx)
 
-            # ✅ 6.2 "person without helmet" → 持续3秒未戴头盔才告警
             abnormal = False
             abnormal_conf = 0.0
             person_obj = None
 
             if need_helmet_check:
                 single_frame_abnormal, person_obj = check_no_hat(all_objects)
-
                 if person_obj:
                     x1, y1, x2, y2 = person_obj["box"]
-                    # 头部中心 + 量化抗抖动（10px 容差）
-                    head_cx = int((x1 + x2) / 2)
-                    head_cy = int(y1 + (y2 - y1) * 0.2)
-                    person_id = (head_cx // 10, head_cy // 10)
-
+                    pid = (int((x1 + x2) / 2) // 30, int((y1 + (y2 - y1) * 0.2) // 30))
                     if single_frame_abnormal:
-                        if person_id not in no_helmet_timer:
-                            no_helmet_timer[person_id] = now
-                        duration = now - no_helmet_timer[person_id]
-                        if duration >= NO_HELMET_ALERT_SECONDS:
+                        if pid not in no_helmet_timer:
+                            no_helmet_timer[pid] = now
+                        if now - no_helmet_timer[pid] >= NO_HELMET_ALERT_SECONDS:
                             abnormal = True
                             abnormal_conf = float(person_obj["conf"])
                     else:
-                        # 只要有一帧判定为"戴了"，立即清零
-                        no_helmet_timer.pop(person_id, None)
+                        no_helmet_timer.pop(pid, None)
+                no_helmet_timer = {k: v for k, v in no_helmet_timer.items() if now - v < 10}
 
-                # 清理离开画面的人
-                no_helmet_timer = {
-                    pid: t for pid, t in no_helmet_timer.items()
-                    if now - t < 10
-                }
-
-                # ✅ 未戴安全帽 → 注入索引（不依赖 obj_name 匹配）
-                if abnormal:
+                if abnormal and "person without helmet" in alert_classes:
                     idx = alert_classes.index("person without helmet")
                     if idx not in current_detected_indices:
                         current_detected_indices.append(idx)
 
-            # =========================
-            # ⑦ 推送索引
-            # =========================
             update_detected_indices_to_server(current_detected_indices)
-
             if current_detected_indices:
-                print(f"[ALERT] 检测到告警对象索引: {current_detected_indices}")
-                print(f"[ALERT] 对应对象: {[alert_classes[i] for i in current_detected_indices]}")
+                print("[ALERT] 检测到告警对象索引:", current_detected_indices)
+                print("[ALERT] 对应对象:", [alert_classes[i] for i in current_detected_indices])
 
-            # =========================
-            # ⑧ 可视化
-            # =========================
             vis = frame.copy()
             for obj in all_objects:
                 x1, y1, x2, y2 = obj["box"]
                 name = obj["name"]
-
-                if name == "helmet":
-                    color = (0, 165, 255)
-                elif name in no_alert_classes:
-                    color = (255, 0, 0)
-                else:
-                    color = (0, 255, 0)
-
+                color = (0, 165, 255) if name == "helmet" else (255, 0, 0) if name in no_alert_classes else (0, 255, 0)
                 if abnormal and name == "person" and obj is person_obj:
                     color = (0, 0, 255)
-
                 cv2.rectangle(vis, (x1, y1), (x2, y2), color, 2)
                 label = f"{name} {obj['conf']:.2f}"
                 if name in no_alert_classes:
@@ -616,46 +420,36 @@ def main():
                 cv2.putText(vis, label, (x1, max(y1 - 6, 35)),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
-            cv2.putText(vis, "Detecting: " + ", ".join(current_classes[:5]),
+            cv2.putText(vis, "Detecting: " + ", ".join(current_classes[:8]),
                         (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-
             if abnormal:
                 cv2.putText(vis, "WARNING: No Helmet!", (10, 65),
                             cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
 
-            # =========================
-            # ⑨ 保存 & 入库
-            # =========================
-            save = False
-            save_abnormal = False
-
+            save = save_abnormal = False
             if all_objects:
                 if abnormal:
                     if now - last_abnormal > abnormal_interval:
-                        save_abnormal = True
-                        last_abnormal = now
+                        save_abnormal, last_abnormal = True, now
                 else:
                     if now - last_save > save_interval:
-                        save = True
-                        last_save = now
+                        save, last_save = True, now
 
             if save or save_abnormal:
                 frame_time = datetime.datetime.now()
                 prefix = "abnormal_" if save_abnormal else "normal_"
-                filename = f"{prefix}{camera_id}_{int(frame_time.timestamp() * 1000)}.jpg"
+                filename = f"{prefix}{current_camera_id}_{int(frame_time.timestamp()*1000)}.jpg"
                 path = os.path.join(SAVE_DIR, filename)
-                image_saved = cv2.imwrite(path, vis)
-
-                if image_saved:
+                if cv2.imwrite(path, vis):
                     db_queue.put({
-                        "camera_id": camera_id,
+                        "camera_id": current_camera_id,
                         "image_path": path,
                         "frame_time": frame_time,
                         "objects": all_objects,
                         "abnormal": abnormal,
                         "abnormal_conf": abnormal_conf,
                         "location": location,
-                        "camera_type": camera_type,
+                        "camera_type": camera_type
                     })
                     if save_abnormal:
                         print("[ALERT] 检测到未佩戴安全帽！")
@@ -664,13 +458,9 @@ def main():
                     print("[IMAGE SAVE ERROR]", path)
 
             update_frame(vis)
-
         except Exception as e:
             print("[MAIN ERROR]", e)
             traceback.print_exc()
-
-    rtsp.stop()
-    cv2.destroyAllWindows()
 
 if __name__ == "__main__":
     main()
