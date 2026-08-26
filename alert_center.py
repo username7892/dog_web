@@ -2,57 +2,196 @@ import json
 import time
 import threading
 import atexit
-import requests
 import traceback
 import os
 from aliyunsdkcore.client import AcsClient
 from aliyunsdkdysmsapi.request.v20170525.SendSmsRequest import SendSmsRequest
 
-SIGN_NAME = "舟山市千鹏无人机科技"       # ✅ 图1里的签名
-TEMPLATE_CODE = "SMS_505370126"         # ✅ 图2里的模板CODE（已修正！）
+
+SIGN_NAME = "舟山市千鹏无人机科技"
+TEMPLATE_CODE = "SMS_505370126"
 REGION = "cn-hangzhou"
 
+
 class AlertCenter:
-    def __init__(self, path="alert_state.json", cooldown_seconds=300):
-        self.path = path
+
+    def __init__(
+        self,
+        path="alert_state.json",
+        cooldown_seconds=300
+    ):
+        self.path = os.path.abspath(path)
         self.cooldown = cooldown_seconds
+
+        # 当前 Python 进程内部锁
         self.lock = threading.Lock()
-        self.state = self._load()
+
+        # 初始化文件
+        self._ensure_file()
+
         atexit.register(self._save)
 
+    # ========================================================
+    # 确保状态文件存在
+    # ========================================================
+
+    def _ensure_file(self):
+
+        if not os.path.exists(self.path):
+
+            with open(
+                self.path,
+                "w",
+                encoding="utf-8"
+            ) as f:
+
+                json.dump(
+                    {},
+                    f,
+                    ensure_ascii=False
+                )
+
+    # ========================================================
+    # 读取状态
+    # ========================================================
+
     def _load(self):
+
         try:
-            with open(self.path, "r", encoding="utf-8") as f:
+
+            with open(
+                self.path,
+                "r",
+                encoding="utf-8"
+            ) as f:
+
                 return json.load(f)
+
         except FileNotFoundError:
+
             return {}
 
-    def _save(self):
-        with self.lock:
-            with open(self.path, "w", encoding="utf-8") as f:
-                json.dump(self.state, f, ensure_ascii=False)
+        except json.JSONDecodeError:
+
+            print(
+                "[ALERT STATE ERROR] "
+                "alert_state.json 格式错误"
+            )
+
+            return {}
+
+    # ========================================================
+    # 保存状态
+    # ========================================================
+
+    def _save(self, state=None):
+
+        if state is None:
+            state = self._load()
+
+        temp_path = self.path + ".tmp"
+
+        with open(
+            temp_path,
+            "w",
+            encoding="utf-8"
+        ) as f:
+
+            json.dump(
+                state,
+                f,
+                ensure_ascii=False,
+                indent=4
+            )
+
+        # 原子替换
+        os.replace(
+            temp_path,
+            self.path
+        )
+
+    # ========================================================
+    # 判断是否允许发送
+    # ========================================================
 
     def should_send_sms(self, alert_type):
-        """
-        alert_type: "no_hat" / "person" / "car"
-        """
+
         with self.lock:
+
+            # ⚠️ 每次重新读取
+            state = self._load()
+
             now = time.time()
-            last = self.state.get(alert_type, 0)
+
+            last = state.get(
+                alert_type,
+                0
+            )
+
+            # ================================================
+            # 5分钟冷却
+            # ================================================
 
             if now - last >= self.cooldown:
-                self.state[alert_type] = now
+
+                # 立即占用发送资格
+                state[alert_type] = now
+
+                self._save(state)
+
+                print(
+                    f"[SMS] 允许发送: {alert_type}"
+                )
+
+                print(
+                    f"[SMS] 上次发送: {last}"
+                )
+
+                print(
+                    f"[SMS] 当前时间: {now}"
+                )
+
                 return True
+
+            remaining = self.cooldown - (
+                now - last
+            )
+
+            print(
+                f"[SMS] {alert_type} "
+                f"仍在冷却中，剩余 "
+                f"{remaining:.1f} 秒"
+            )
 
             return False
 
+    # ========================================================
+    # 发送失败，回滚
+    # ========================================================
+
     def rollback(self, alert_type):
+
         with self.lock:
+
+            state = self._load()
+
             now = time.time()
-            last = self.state.get(alert_type, 0)
-            # 只回滚 10 秒内写入的时间
+
+            last = state.get(
+                alert_type,
+                0
+            )
+
+            # 只有刚刚占用的发送资格才允许回滚
             if now - last < 10:
-                self.state[alert_type] = 0
+
+                state[alert_type] = 0
+
+                self._save(state)
+
+                print(
+                    f"[SMS] 回滚成功: {alert_type}"
+                )
 
 
 
@@ -121,7 +260,7 @@ def load_message_key():
         )
         raise
 
-    
+
 def send_sms(phone, message, location="未知位置", conf=None):
     try:
         access_key_id, access_key_secret = load_message_key()
