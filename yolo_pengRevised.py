@@ -20,6 +20,7 @@ import traceback
 
 from ultralytics import YOLOE
 from alert_center import AlertCenter, send_sms
+from gos_detection_client import GosDetectionReporter
 
 
 # ============================================================
@@ -27,6 +28,10 @@ from alert_center import AlertCenter, send_sms
 # ============================================================
 
 camera_id = "front_camera"
+
+# 上报 GOS 时使用的相机标识，需与 inspection-app 的
+# detection.camera-yaw-offset-deg 配置键一致（front / rear）。
+gos_camera_id = os.getenv("GOS_CAMERA_ID", "front")
 
 RTSP_URL = (
     "rtsp://admin:dhlb839.@192.168.50.64:554/Streaming/Channels/101"
@@ -51,6 +56,11 @@ CAMERA_TYPES = {
 db_queue = queue.Queue(maxsize=200)
 
 alert_center = AlertCenter(cooldown_seconds=300)
+
+# 检测结果上报 GOS 巡检应用，由 GOS 结合雷达位姿投影成世界坐标。
+# GOS_URL 例如 http://100.95.170.3:8080；GOS_CAMERA_ID 需与
+# inspection-app 的 detection.camera-yaw-offset-deg 配置键一致。
+gos_reporter = GosDetectionReporter(camera_id=gos_camera_id)
 
 
 # ============================================================
@@ -585,6 +595,22 @@ def main():
                         "location": location,
                         "camera_type": camera_type,
                     })
+
+            # 上报 GOS：只发像素框，世界坐标由 GOS 用雷达位姿推算。
+            # 放在画框之后，这样告警截图上带检测框；截图由 gos_reporter 按间隔节流。
+            snapshot = None
+            if abnormal and gos_reporter.snapshot_due():
+                encoded, buffer = cv2.imencode(
+                    ".jpg", vis, [int(cv2.IMWRITE_JPEG_QUALITY), 70]
+                )
+                if encoded:
+                    snapshot = buffer.tobytes()
+            gos_reporter.publish(
+                all_objects,
+                frame.shape[1],
+                frame.shape[0],
+                snapshot=snapshot,
+            )
 
             # 更新 Web 页面
             update_frame(vis)
